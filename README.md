@@ -151,6 +151,11 @@ Six parts were designed (STEP + STL provided in [`mechanical-cad/`](mechanical-c
 - **Schematic**: designed in KiCad — [`electronics-kicad/projet_falc.kicad_sch`](electronics-kicad/projet_falc.kicad_sch)
 - **PCB**: a KiCad PCB project file is included, but no copper layout was finalized for this phase — the schematic and point-to-point wiring table above are the actual deliverable used in the field.
 
+<p align="center">
+  <img src="electronics-kicad/render/schematic_reconstruction.png" alt="Schematic reconstruction from the KiCad file" width="800">
+</p>
+<p align="center"><em>Component placement and wiring reconstructed programmatically from <code>projet_falc.kicad_sch</code> (exact positions and net connections parsed from the file, redrawn since the schematic was authored in a newer KiCad file format than fits this environment's renderer). Visible blocks: ESP32 dev kit, VESC-driven brushless hub motor + MOSFET module, servo, RGB spot LED driver, TOF/LiDAR rangefinder, 36V→24V→12V/5V regulator chain from the battery.</em></p>
+
 ## Repository layout
 
 ```

@@ -11,6 +11,14 @@ A full electronics and control-system retrofit for **INTARSO**, a motorized targ
 This project was delivered by **AMJE Arts et Métiers Junior Études** in partnership with **JEECE** (a fellow Junior-Entreprise specialized in embedded electronics), to replace the robot's original, failing control electronics end-to-end.
 
 <p align="center">
+  <a href="https://youtube.com/shorts/YrYRk8fM58c">
+    <img src="https://img.youtube.com/vi/YrYRk8fM58c/maxresdefault.jpg" alt="INTARSO on-site demonstration — watch on YouTube" width="500">
+  </a>
+  <br>
+  <em>▶️ <a href="https://youtube.com/shorts/YrYRk8fM58c">Watch the on-site demonstration on YouTube</a></em>
+</p>
+
+<p align="center">
   <img src="docs/photos/target_after_shooting_session.jpg" alt="INTARSO target after a live shooting session" width="420">
   &nbsp;
   <img src="docs/photos/tablet_hmi_dashboard.jpg" alt="Wireless tablet HMI dashboard" width="420">

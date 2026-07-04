@@ -162,7 +162,7 @@ Six parts were designed (STEP + STL provided in [`mechanical-cad/`](mechanical-c
 <p align="center">
   <img src="electronics-kicad/render/schematic_reconstruction.png" alt="Schematic reconstruction from the KiCad file" width="800">
 </p>
-<p align="center"><em>Component placement and wiring reconstructed programmatically from <code>projet_falc.kicad_sch</code> (exact positions and net connections parsed from the file, redrawn since the schematic was authored in a newer KiCad file format than fits this environment's renderer). Visible blocks: ESP32 dev kit, VESC-driven brushless hub motor + MOSFET module, servo, RGB spot LED driver, TOF/LiDAR rangefinder, 36V→24V→12V/5V regulator chain from the battery.</em></p>
+<p align="center"><em>Faithful redraw of <code>projet_falc.kicad_sch</code>: every symbol's real body graphics, pins, wires, junctions, no-connects and net labels (DIN/CIN, TX_ESC/RX_ESC) parsed straight from the KiCad 9 file — connectivity machine-verified (103/103 pins attached, 0 dangling wires). Visible blocks: ESP32 dev kit, VESC ESC + brushless hub motor, MOSFET module driving the RGB spot, servo, TOF/LiDAR rangefinder, and the 36V battery → 24V → 12V/5V regulator chain.</em></p>
 
 ## Repository layout
 

@@ -1,0 +1,1297 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+#include <ESP32Servo.h>
+#include <VescUart.h>
+#include <HardwareSerial.h>
+#include <ArduinoJson.h>
+#include <FastLED.h>
+#include <HTTPUpdateServer.h>
+
+// --- PIN CONFIGURATION ---
+#define NUM_LEDS 1
+#define DATA_PIN 23
+#define CLOCK_PIN 19
+#define PIN_ROT 5
+#define DISTANCEMAX 24000 //distance max possible
+#define DISTANCEMAXREEL 24830 //distance initial du robot. (distance lu par le lidar lorque le robot est au point 0)
+
+HardwareSerial LidarSerial(1); 
+HardwareSerial VescSerial(2);  
+VescUart vesc;
+Servo servoRot;
+CRGB leds[NUM_LEDS];
+
+// --- WIFI ---
+const char* AP_SSID = "Rameneur1";     //nom du point d'acces au robot
+const char* AP_PASS = "12345678";      //mot de passe
+WebServer server(80);
+HTTPUpdateServer httpUpdater;
+WebSocketsServer webSocket = WebSocketsServer(81);
+
+// --- STATE & TARGET ---
+unsigned long lastLidarTime = 0;
+const float initial_dist = DISTANCEMAXREEL;
+float current_dist_mm = 0;
+float filtered_dist_mm = 0;
+float target_dist_mm = 0; 
+int rot_pos = 5;                   // servo position in degrees
+bool moving_translation = false;
+float distance_par_tour = 0.4366;  //distance pour un tour de roue
+float distanceRobot = 0;
+int hitCible = 0;
+static unsigned long lastPID = 0;
+
+
+// --- PID PARAMETERS ---
+float Kp = 0.00030; 
+float Ki = 0.000010; 
+float Kd = 0.00045;  
+float erreur_precedente = 0;
+float integral = 0;
+const float MAX_DUTY = 0.30;  // max speed as duty cycle (percentage of voltage sent to the motor) do not exceed 0.66
+// WARNING: if the speed is changed, the PID values will need to be re-tuned as well.
+
+// --- RAMP PARAMETERS ---
+float current_duty = 0;          
+const float ACCEL_STEP = 0.005;
+
+//interface:
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Robot Interface</title>
+<style>
+  :root {
+    --bg:      #050505;
+    --panel:   #0a0a0a;
+    --gold:    #B79A4A;
+    --gold-hi: #D4B86A;
+    --gold-dk: #7A6430;
+    --txt:     #F0E4CC;
+    --gray:    #5A5A5A;
+    --red:     #C0392B;
+    --red-hi:  #E74C3C;
+    --blue:    #1A6FA8;
+    --blue-hi: #4AA8FF;
+    --green:   #27AE60;
+    --orange:  #E67E22;
+    --border:  #1E1A10;
+    --white-bulb: #F3F3F3;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    background: var(--bg);
+    color: var(--txt);
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  #app {
+    display: grid;
+    grid-template-rows: 125px auto 1fr 68px;
+    height: 100vh;
+    padding: 4px 10px 4px;
+    gap: 6px;
+  }
+
+  /* ── TOPBAR ── */
+  #topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: #000000;
+    margin: -4px -10px 0;
+    padding: 6px 14px 6px;
+    border-bottom: 2px solid #000000;
+  }
+
+  #top-logo-wrap {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+  }
+
+  #top-logo {
+    max-height: 115px;
+    max-width: 100%;
+    object-fit: contain;
+    display: block;
+  }
+
+  #stop-btn {
+    background: var(--red);
+    color: white;
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: 3px;
+    border: none;
+    padding: 0 26px;
+    height: 62px;
+    cursor: pointer;
+    clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+    transition: background .15s;
+    flex-shrink: 0;
+    box-shadow: 0 0 20px rgba(192,57,43,.45);
+  }
+  #stop-btn:active { background: var(--red-hi); }
+
+  /* ── NIVEAU 1 : ACTIONS PRINCIPALES ── */
+  #level1 {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold);
+    padding: 8px 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .preset-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  .preset-btn {
+    background: #111;
+    color: var(--gold);
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+    border: 1.5px solid var(--gold-dk);
+    height: 56px;
+    flex: 1;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: background .12s, color .12s, border-color .12s;
+    clip-path: polygon(5px 0%, 100% 0%, calc(100% - 5px) 100%, 0% 100%);
+  }
+  .preset-btn:active { background: var(--gold); color: #111; border-color: var(--gold-hi); }
+
+  .target-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: center;
+  }
+
+  .adj-btn {
+    background: var(--gold-dk);
+    color: var(--txt);
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-size: 1.8rem;
+    font-weight: 700;
+    border: none;
+    width: 46px;
+    height: 46px;
+    cursor: pointer;
+    clip-path: polygon(6px 0%, 100% 0%, calc(100% - 6px) 100%, 0% 100%);
+    transition: background .12s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .adj-btn:active { background: var(--gold); color: #111; }
+
+  #target-display {
+    background: var(--gold);
+    color: #111;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1.65rem;
+    font-weight: 700;
+    flex: 1;
+    max-width: 180px;
+    height: 46px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    clip-path: polygon(6px 0%, 100% 0%, calc(100% - 6px) 100%, 0% 100%);
+  }
+
+  .action-row {
+    display: flex;
+    gap: 10px;
+  }
+
+  .send-btn {
+    background: linear-gradient(135deg, var(--gold-dk), var(--gold));
+    color: #111;
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-size: 1.45rem;
+    font-weight: 700;
+    letter-spacing: 2px;
+    border: none;
+    height: 64px;
+    flex: 3;
+    cursor: pointer;
+    clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+    transition: filter .15s;
+    box-shadow: 0 0 18px rgba(183,154,74,.35);
+  }
+  .send-btn:active { filter: brightness(1.3); }
+
+  .home-btn {
+    background: linear-gradient(135deg, var(--blue), var(--blue-hi));
+    color: #fff;
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-size: 1.45rem;
+    font-weight: 700;
+    letter-spacing: 2px;
+    border: none;
+    height: 64px;
+    flex: 2;
+    cursor: pointer;
+    clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+    transition: filter .15s;
+    box-shadow: 0 0 18px rgba(26,111,168,.35);
+  }
+  .home-btn:active { filter: brightness(1.3); }
+
+  /* ── NIVEAU 2 : SECONDAIRE (remplit l'espace restant) ── */
+  #level2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    min-height: 0;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 7px 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    position: relative;
+    min-height: 0;
+  }
+  .panel::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 28px; height: 2px;
+    background: var(--gold);
+  }
+
+  .panel-title {
+    font-size: .78rem;
+    font-weight: 700;
+    color: var(--gold);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+
+  .sensor-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #0f0f0f;
+    border: 1px solid var(--border);
+    padding: 3px 8px;
+    flex-shrink: 0;
+  }
+
+  .sensor-label {
+    font-size: .66rem;
+    color: var(--gray);
+    letter-spacing: 2px;
+  }
+
+  .sensor-value {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1rem;
+    color: var(--gold-hi);
+  }
+  .sensor-value.moving { color: var(--green); }
+
+  /* -- ROTATION GRID -- fills the vertical space -- */
+  .rot-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 5px;
+    flex: 1;
+  }
+
+  .rot-btn {
+    background: #111;
+    color: var(--gold);
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border: 1px solid var(--gold-dk);
+    cursor: pointer;
+    clip-path: polygon(5px 0%, 100% 0%, calc(100% - 5px) 100%, 0% 100%);
+    transition: background .12s, color .12s, box-shadow .12s;
+    width: 100%;
+    height: 100%;
+    padding: 6px 2px;
+  }
+  .rot-btn:active { background: var(--gold); color: #111; }
+  .rot-btn.active {
+    background: var(--gold);
+    color: #111;
+    border-color: var(--gold-hi);
+    box-shadow: 0 0 0 2px var(--gold-hi), 0 0 14px rgba(212,184,106,.5);
+    font-weight: 900;
+  }
+
+  /* -- LIGHTING: large bulbs + OFF underneath -- */
+  #panel-lights {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  /* Colored bulbs area -- flex:1 to fill space */
+  .bulbs-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 6px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .light-btn {
+    background: #0d0d0d;
+    border: 1.5px solid #2a2a2a;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 4px 6px;
+    transition: transform .12s, border-color .15s, background .15s;
+    clip-path: polygon(5px 0%, 100% 0%, calc(100% - 5px) 100%, 0% 100%);
+    width: 100%;
+    height: 100%;
+  }
+  .light-btn:active { transform: scale(0.95); }
+
+  /* Bordure active */
+  .light-btn.active[data-color="blue"]  { border-color: var(--blue-hi);  background: #071420; }
+  .light-btn.active[data-color="white"] { border-color: #ccc;             background: #141414; }
+  .light-btn.active[data-color="red"]   { border-color: var(--red-hi);   background: #1a0808; }
+
+  /* ── SVG AMPOULE ── */
+  .bulb-svg {
+    width: 42px;
+    height: 68px;
+    flex-shrink: 0;
+    transition: filter .2s;
+    overflow: visible;
+  }
+
+  /* Globe — inactif */
+  .bulb-svg .glass {
+    fill: #1a1a1a;
+    stroke: #383838;
+    stroke-width: 1.5;
+    transition: fill .2s, stroke .2s;
+  }
+  /* Reflet interne */
+  .bulb-svg .shine {
+    fill: rgba(255,255,255,.04);
+    transition: fill .2s;
+  }
+  /* Filament */
+  .bulb-svg .filament {
+    stroke: #4a4a4a;
+    stroke-width: 1.4;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: stroke .2s;
+  }
+  /* Fils de support */
+  .bulb-svg .wire {
+    stroke: #363636;
+    stroke-width: 1;
+    transition: stroke .2s;
+  }
+  /* Metal base -- bands */
+  .bulb-svg .base-a { fill: #525252; }
+  .bulb-svg .base-b { fill: #363636; }
+  .bulb-svg .contact { fill: #606060; }
+
+  /* Tinte inactive selon couleur */
+  .light-btn[data-color="blue"]  .bulb-svg .glass { fill: #0a1a28; stroke: #1a3e58; }
+  .light-btn[data-color="white"] .bulb-svg .glass { fill: #1a1a1a; stroke: #444; }
+  .light-btn[data-color="red"]   .bulb-svg .glass { fill: #220808; stroke: #5a1a1a; }
+
+  /* ── ACTIF : couleur vive + halo ── */
+  .light-btn.active[data-color="blue"] .bulb-svg {
+    filter: drop-shadow(0 0 8px rgba(74,168,255,.9)) drop-shadow(0 0 18px rgba(74,168,255,.5));
+  }
+  .light-btn.active[data-color="blue"] .bulb-svg .glass   { fill: #4AA8FF; stroke: #b8ddff; }
+  .light-btn.active[data-color="blue"] .bulb-svg .shine   { fill: rgba(255,255,255,.22); }
+  .light-btn.active[data-color="blue"] .bulb-svg .filament { stroke: #fff; }
+  .light-btn.active[data-color="blue"] .bulb-svg .wire    { stroke: #c0e0ff; }
+
+  .light-btn.active[data-color="white"] .bulb-svg {
+    filter: drop-shadow(0 0 8px rgba(255,255,255,.9)) drop-shadow(0 0 18px rgba(255,255,255,.45));
+  }
+  .light-btn.active[data-color="white"] .bulb-svg .glass   { fill: #F3F3F3; stroke: #ffffff; }
+  .light-btn.active[data-color="white"] .bulb-svg .shine   { fill: rgba(255,255,255,.35); }
+  .light-btn.active[data-color="white"] .bulb-svg .filament { stroke: #aaa; }
+  .light-btn.active[data-color="white"] .bulb-svg .wire    { stroke: #ccc; }
+
+  .light-btn.active[data-color="red"] .bulb-svg {
+    filter: drop-shadow(0 0 8px rgba(231,76,60,.9)) drop-shadow(0 0 18px rgba(231,76,60,.5));
+  }
+  .light-btn.active[data-color="red"] .bulb-svg .glass   { fill: #E74C3C; stroke: #ff9090; }
+  .light-btn.active[data-color="red"] .bulb-svg .shine   { fill: rgba(255,200,180,.22); }
+  .light-btn.active[data-color="red"] .bulb-svg .filament { stroke: #ffddcc; }
+  .light-btn.active[data-color="red"] .bulb-svg .wire    { stroke: #ff9090; }
+
+  /* Label under the bulb */
+  .bulb-label {
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--gray);
+    transition: color .15s;
+  }
+  .light-btn[data-color="blue"]  .bulb-label { color: #245b80; }
+  .light-btn[data-color="white"] .bulb-label { color: #555; }
+  .light-btn[data-color="red"]   .bulb-label { color: #7a2d2d; }
+  .light-btn.active[data-color="blue"]  .bulb-label { color: var(--blue-hi); }
+  .light-btn.active[data-color="white"] .bulb-label { color: #ddd; }
+  .light-btn.active[data-color="red"]   .bulb-label { color: var(--red-hi); }
+
+  /* Bouton OFF — pleine largeur */
+  .off-btn {
+    width: 100%;
+    height: 36px;
+    border-radius: 4px;
+    border: 1.5px solid #333;
+    background: #111;
+    color: #555;
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: 3px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: background .12s, color .12s, box-shadow .12s;
+    clip-path: polygon(6px 0%, 100% 0%, calc(100% - 6px) 100%, 0% 100%);
+    flex-shrink: 0;
+  }
+  .off-btn:active, .off-btn.active {
+    background: #1e1e1e;
+    color: #ccc;
+    border-color: #666;
+    box-shadow: 0 0 10px rgba(255,255,255,.1);
+  }
+
+  /* -- TELEMETRY -- */
+  #telemetry {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 3px 8px 3px;
+    display: grid;
+    grid-template-rows: 14px 1fr;
+    gap: 2px;
+  }
+
+  #tele-ws {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 2px;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: .62rem;
+    letter-spacing: 1px;
+    color: var(--gray);
+  }
+
+  #ws-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--red);
+    display: inline-block;
+    margin-right: 4px;
+    animation: pulse-red 1.5s infinite;
+  }
+  #ws-dot.ok { background: var(--green); animation: pulse-green 2s infinite; }
+
+  @keyframes pulse-red {
+    0%,100% { box-shadow: 0 0 0 0 rgba(192,57,43,0); }
+    50%     { box-shadow: 0 0 0 3px rgba(192,57,43,.5); }
+  }
+  @keyframes pulse-green {
+    0%,100% { box-shadow: 0 0 0 0 rgba(39,174,96,0); }
+    50%     { box-shadow: 0 0 0 3px rgba(39,174,96,.4); }
+  }
+
+  #tele-cells {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 3px;
+  }
+
+  .tele-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #0f0f0f;
+    border: 1px solid var(--border);
+    padding: 1px 2px;
+  }
+
+  .tele-icon  { font-size: .8rem; line-height: 1; }
+  .tele-label { font-size: .58rem; color: var(--gray); letter-spacing: 1px; text-transform: uppercase; }
+  .tele-value { font-family: 'Courier New', Courier, monospace; font-size: .88rem; color: var(--gold-hi); font-weight: 700; }
+  .tele-value.warn  { color: var(--orange); }
+  .tele-value.alert { color: var(--red-hi); }
+
+  /* ── FLASH ── */
+  .flash {
+    position: fixed;
+    bottom: 40px; left: 50%;
+    transform: translateX(-50%);
+    background: var(--gold);
+    color: #111;
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-weight: 700;
+    font-size: .9rem;
+    letter-spacing: 2px;
+    padding: 5px 18px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s;
+    z-index: 999;
+  }
+  .flash.show { opacity: 1; }
+
+  /* -- HIT ALERT MODAL -- */
+  #hit-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.82);
+    z-index: 9999;
+    justify-content: center;
+    align-items: center;
+    backdrop-filter: blur(3px);
+  }
+  #hit-overlay.show { display: flex; }
+
+  #hit-box {
+    background: #0e0e0e;
+    border: 2px solid var(--red);
+    box-shadow: 0 0 40px rgba(192,57,43,.6), 0 0 80px rgba(192,57,43,.25);
+    padding: 28px 32px 24px;
+    max-width: 88vw;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+    clip-path: polygon(12px 0%, 100% 0%, calc(100% - 12px) 100%, 0% 100%);
+    animation: hit-in .25s ease-out;
+  }
+  @keyframes hit-in { from { transform: scale(.88); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+  #hit-icon { font-size: 3.2rem; line-height: 1; animation: hit-pulse 1s infinite; }
+  @keyframes hit-pulse {
+    0%,100% { text-shadow: 0 0 0px rgba(231,76,60,0); }
+    50%     { text-shadow: 0 0 20px rgba(231,76,60,.9); }
+  }
+
+  #hit-title { font-family: 'Arial Narrow', Arial, sans-serif; font-size: 1.25rem; font-weight: 700; letter-spacing: 3px; color: var(--red-hi); text-transform: uppercase; text-align: center; }
+  #hit-msg   { font-family: 'Arial Narrow', Arial, sans-serif; font-size: 1.05rem; color: var(--txt); text-align: center; line-height: 1.6; letter-spacing: 1px; }
+
+  #hit-close {
+    background: var(--green); color: #fff;
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    font-size: 1.1rem; font-weight: 700; letter-spacing: 3px;
+    border: none; padding: 12px 36px; cursor: pointer;
+    clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+    margin-top: 4px; transition: filter .15s;
+  }
+  #hit-close:active { filter: brightness(1.25); }
+
+  #hit-code-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; }
+  #hit-code-label { font-family: 'Arial Narrow', Arial, sans-serif; font-size: .9rem; letter-spacing: 2px; color: var(--gray); text-transform: uppercase; }
+  #hit-code-input {
+    background: #111; border: 2px solid var(--gold-dk); color: var(--gold-hi);
+    font-family: 'Courier New', Courier, monospace; font-size: 2rem; font-weight: 700;
+    letter-spacing: 10px; text-align: center; width: 160px; padding: 8px 12px;
+    outline: none; transition: border-color .2s; -webkit-text-security: disc;
+  }
+  #hit-code-input:focus  { border-color: var(--gold-hi); box-shadow: 0 0 12px rgba(212,184,106,.35); }
+  #hit-code-input.wrong  { border-color: var(--red-hi); animation: shake .35s ease; }
+  #hit-code-input.correct { border-color: var(--green); box-shadow: 0 0 12px rgba(39,174,96,.5); }
+
+  @keyframes shake {
+    0%,100% { transform: translateX(0); }
+    20% { transform: translateX(-8px); }
+    40% { transform: translateX(8px); }
+    60% { transform: translateX(-6px); }
+    80% { transform: translateX(6px); }
+  }
+  #hit-code-error { font-family: 'Arial Narrow', Arial, sans-serif; font-size: .85rem; color: var(--red-hi); letter-spacing: 2px; min-height: 18px; text-align: center; }
+
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- TOPBAR -->
+  <div id="topbar">
+    <div id="top-logo-wrap">
+      <img id="top-logo" src="data:image/jpeg;base64,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" alt="Logo SGP">
+    </div>
+    <button id="stop-btn" onclick="cmdStop()">&#9632; STOP</button>
+  </div>
+
+  <!-- NIVEAU 1 : ACTIONS PRINCIPALES -->
+  <div id="level1">
+    <div class="preset-row">
+      <button class="preset-btn" onclick="setDist(7)">7 m</button>
+      <button class="preset-btn" onclick="setDist(10)">10 m</button>
+      <button class="preset-btn" onclick="setDist(15)">15 m</button>
+      <button class="preset-btn" onclick="setDist(20)">20 m</button>
+      <button class="preset-btn" onclick="setDist(24)">24 m</button>
+    </div>
+    <div class="target-row">
+      <button class="adj-btn" onpointerdown="startAdj(-1)" onpointerup="stopAdj()" onpointerleave="stopAdj()">&#8722;</button>
+      <div id="target-display">23 m</div>
+      <button class="adj-btn" onpointerdown="startAdj(+1)" onpointerup="stopAdj()" onpointerleave="stopAdj()">+</button>
+    </div>
+    <div class="action-row">
+      <button class="send-btn" onclick="sendDist()">&#9654;&nbsp; SEND TARGET</button>
+      <button class="home-btn" onclick="cmdHome()">&#8962;&nbsp; HOME</button>
+    </div>
+  </div>
+
+  <!-- NIVEAU 2 : SECONDAIRE -->
+  <div id="level2">
+
+    <!-- ROTATION + POSITION -->
+    <div class="panel">
+      <div class="panel-title">&#8635; ROTATION &amp; POSITION</div>
+      <div class="sensor-row">
+        <span class="sensor-label">Target position</span>
+        <span class="sensor-value" id="rot-state" style="font-size:.9rem;letter-spacing:2px;">&#8212;</span>
+      </div>
+      <div class="sensor-row">
+        <span class="sensor-label">Measured distance</span>
+        <span class="sensor-value" id="dist-meas">&#8212; m</span>
+      </div>
+      <div class="sensor-row">
+        <span class="sensor-label">Status</span>
+        <span class="sensor-value" id="status-moving">STANDBY</span>
+      </div>
+      <div class="rot-grid">
+        <button class="rot-btn" id="btn-left"   onclick="cmdRot('left')">Front</button>
+        <button class="rot-btn" id="btn-center" onclick="cmdRot('center')">Middle</button>
+        <button class="rot-btn" id="btn-right"  onclick="cmdRot('right')">Back</button>
+      </div>
+    </div>
+
+    <!-- LIGHTING -->
+    <div class="panel" id="panel-lights">
+      <div class="panel-title">&#128161; &Eacute;CLAIRAGE</div>
+
+      <!-- 3 large realistic SVG bulbs -->
+      <div class="bulbs-row">
+
+        <button class="light-btn" data-color="blue" onclick="cmdLight('blue')">
+          <svg class="bulb-svg" viewBox="0 0 44 72" xmlns="http://www.w3.org/2000/svg">
+            <!-- Globe en verre -->
+            <path class="glass" d="M22,3 C12,3 4,11 4,21 C4,30 9,38 14,44 C16,47 17,50 17,53 L27,53 C27,50 28,47 30,44 C35,38 40,30 40,21 C40,11 32,3 22,3 Z"/>
+            <!-- Reflet interne -->
+            <ellipse class="shine" cx="15" cy="14" rx="4" ry="6"/>
+            <!-- Fils support filament -->
+            <line class="wire" x1="19" y1="53" x2="19" y2="44"/>
+            <line class="wire" x1="25" y1="53" x2="25" y2="44"/>
+            <!-- Filament en W -->
+            <path class="filament" d="M19,44 L20,40 L22,43 L24,40 L25,44"/>
+            <!-- Metal base -- screwed bands -->
+            <rect class="base-a" x="17" y="53" width="10" height="2.5" rx="0.5"/>
+            <rect class="base-b" x="17" y="55.5" width="10" height="2"/>
+            <rect class="base-a" x="17" y="57.5" width="10" height="2"/>
+            <rect class="base-b" x="17" y="59.5" width="10" height="2"/>
+            <rect class="base-a" x="17" y="61.5" width="10" height="2"/>
+            <rect class="base-b" x="17" y="63.5" width="10" height="2"/>
+            <!-- Contact bas -->
+            <rect class="contact" x="19" y="65.5" width="6" height="4" rx="1.5"/>
+          </svg>
+          <span class="bulb-label">Blue</span>
+        </button>
+
+        <button class="light-btn" data-color="white" onclick="cmdLight('white')">
+          <svg class="bulb-svg" viewBox="0 0 44 72" xmlns="http://www.w3.org/2000/svg">
+            <path class="glass" d="M22,3 C12,3 4,11 4,21 C4,30 9,38 14,44 C16,47 17,50 17,53 L27,53 C27,50 28,47 30,44 C35,38 40,30 40,21 C40,11 32,3 22,3 Z"/>
+            <ellipse class="shine" cx="15" cy="14" rx="4" ry="6"/>
+            <line class="wire" x1="19" y1="53" x2="19" y2="44"/>
+            <line class="wire" x1="25" y1="53" x2="25" y2="44"/>
+            <path class="filament" d="M19,44 L20,40 L22,43 L24,40 L25,44"/>
+            <rect class="base-a" x="17" y="53" width="10" height="2.5" rx="0.5"/>
+            <rect class="base-b" x="17" y="55.5" width="10" height="2"/>
+            <rect class="base-a" x="17" y="57.5" width="10" height="2"/>
+            <rect class="base-b" x="17" y="59.5" width="10" height="2"/>
+            <rect class="base-a" x="17" y="61.5" width="10" height="2"/>
+            <rect class="base-b" x="17" y="63.5" width="10" height="2"/>
+            <rect class="contact" x="19" y="65.5" width="6" height="4" rx="1.5"/>
+          </svg>
+          <span class="bulb-label">White</span>
+        </button>
+
+        <button class="light-btn" data-color="red" onclick="cmdLight('red')">
+          <svg class="bulb-svg" viewBox="0 0 44 72" xmlns="http://www.w3.org/2000/svg">
+            <path class="glass" d="M22,3 C12,3 4,11 4,21 C4,30 9,38 14,44 C16,47 17,50 17,53 L27,53 C27,50 28,47 30,44 C35,38 40,30 40,21 C40,11 32,3 22,3 Z"/>
+            <ellipse class="shine" cx="15" cy="14" rx="4" ry="6"/>
+            <line class="wire" x1="19" y1="53" x2="19" y2="44"/>
+            <line class="wire" x1="25" y1="53" x2="25" y2="44"/>
+            <path class="filament" d="M19,44 L20,40 L22,43 L24,40 L25,44"/>
+            <rect class="base-a" x="17" y="53" width="10" height="2.5" rx="0.5"/>
+            <rect class="base-b" x="17" y="55.5" width="10" height="2"/>
+            <rect class="base-a" x="17" y="57.5" width="10" height="2"/>
+            <rect class="base-b" x="17" y="59.5" width="10" height="2"/>
+            <rect class="base-a" x="17" y="61.5" width="10" height="2"/>
+            <rect class="base-b" x="17" y="63.5" width="10" height="2"/>
+            <rect class="contact" x="19" y="65.5" width="6" height="4" rx="1.5"/>
+          </svg>
+          <span class="bulb-label">Red</span>
+        </button>
+
+      </div>
+
+      <!-- OFF pleine largeur en dessous -->
+      <button class="off-btn active" id="btn-light-off" onclick="cmdLight('off')">
+        &#9211;&nbsp; OFF
+      </button>
+    </div>
+
+  </div>
+
+  <!-- LEVEL 3: TELEMETRY -->
+  <div id="telemetry">
+    <div id="tele-ws">
+      <span><span id="ws-dot"></span><span id="ws-txt">WS: disconnected</span></span>
+      <span id="last-cmd">&#8212;</span>
+    </div>
+    <div id="tele-cells">
+      <div class="tele-cell">
+        <span class="tele-icon">&#128267;</span>
+        <span class="tele-label">VOLTAGE</span>
+        <span class="tele-value" id="t-voltage">&#8212;</span>
+      </div>
+      <div class="tele-cell">
+        <span class="tele-icon">&#128267;</span>
+        <span class="tele-label">BATTERY</span>
+        <span class="tele-value" id="t-battery">&#8212;</span>
+      </div>
+      <div class="tele-cell">
+        <span class="tele-icon">&#127777;</span>
+        <span class="tele-label">TEMP</span>
+        <span class="tele-value" id="t-temp">&#8212;</span>
+      </div>
+      <div class="tele-cell">
+        <span class="tele-icon">&#128663;</span>
+        <span class="tele-label">SPEED</span>
+        <span class="tele-value" id="t-speed">&#8212;</span>
+      </div>
+      <div class="tele-cell">
+        <span class="tele-icon">&#128204;</span>
+        <span class="tele-label">POSITION</span>
+        <span class="tele-value" id="t-pos">&#8212;</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="flash" id="flash"></div>
+
+<script>
+const HOST   = window.location.hostname;
+const BASE   = 'http://' + HOST;
+const WS_URL = 'ws://' + HOST + ':81/';
+
+let targetDist = 23;
+const MIN_D = 0, MAX_D = 24;
+let adjTimer = null, ws = null;
+let currentLight = 'off';
+let currentRot = null;
+let hitAlertActive = false;
+let returningHome = false;
+
+window.onload = () => {
+  updateTargetDisplay();
+  connectWS();
+  updateLightUI('off');
+};
+
+// ── HTTP ──────────────────────────────────────────────
+async function post(path) {
+  try {
+    const r = await fetch(BASE + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+    setLastCmd(path + ' → ' + r.status);
+    return r.ok;
+  } catch(e) {
+    setLastCmd('ERR: ' + e.message);
+    return false;
+  }
+}
+
+function cmdStop()  { post('/api/stop'); flash('STOP'); }
+
+function cmdHome() {
+  targetDist = 0;
+  updateTargetDisplay();
+  post('/api/move?dist=0');
+  flash('HOME → 0 m');
+}
+
+function cmdLight(c) {
+  currentLight = c;
+  updateLightUI(c);
+  post('/api/light?c=' + c);
+  flash('LIGHT ' + c.toUpperCase());
+}
+
+function updateLightUI(color) {
+  document.querySelectorAll('.light-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.color === color);
+  });
+  document.getElementById('btn-light-off').classList.toggle('active', color === 'off');
+}
+
+function cmdRot(dir) {
+  currentRot = dir;
+  updateRotUI(dir);
+  post('/api/' + dir);
+  const labels = { left: 'F - 0deg', center: 'M - 90deg', right: 'D - 180deg' };
+  flash(labels[dir] || dir.toUpperCase());
+}
+
+function updateRotUI(dir) {
+  ['left', 'center', 'right'].forEach(d => {
+    const b = document.getElementById('btn-' + d);
+    if (b) b.classList.toggle('active', d === dir);
+  });
+  const labels = { left: 'FRONT', center: 'MIDDLE', right: 'BACK' };
+  const el = document.getElementById('rot-state');
+  if (el) el.textContent = labels[dir] || '—';
+}
+
+function setDist(m, send = true) {
+  targetDist = Math.max(MIN_D, Math.min(MAX_D, m));
+  updateTargetDisplay();
+  if (send) sendDist();
+}
+
+function sendDist() {
+  post('/api/move?dist=' + targetDist);
+  flash('TARGET → ' + targetDist + ' m');
+}
+
+function startAdj(d) {
+  applyAdj(d);
+  adjTimer = setInterval(() => applyAdj(d), 200);
+}
+function stopAdj() { clearInterval(adjTimer); adjTimer = null; }
+function applyAdj(d) {
+  targetDist = Math.max(MIN_D, Math.min(MAX_D, targetDist + d));
+  updateTargetDisplay();
+}
+function updateTargetDisplay() {
+  document.getElementById('target-display').textContent = targetDist + ' m';
+}
+
+// ── WEBSOCKET ─────────────────────────────────────────
+function connectWS() {
+  // Safety: empty hostname = local file:// opening, no WebSocket
+  if (!HOST) {
+    document.getElementById('ws-txt').textContent = 'WS: local mode';
+    return;
+  }
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    document.getElementById('ws-dot').classList.add('ok');
+    document.getElementById('ws-txt').textContent = 'WS: connected';
+  };
+
+  ws.onclose = () => {
+    document.getElementById('ws-dot').classList.remove('ok');
+    document.getElementById('ws-txt').textContent = 'WS: disconnected';
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onerror = () => {
+    document.getElementById('ws-txt').textContent = 'WS: error';
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const d = JSON.parse(evt.data);
+
+      if (d.dist_m !== undefined) {
+        const v = parseFloat(d.dist_m).toFixed(2) + ' m';
+        document.getElementById('dist-meas').textContent = v;
+        document.getElementById('t-pos').textContent = parseFloat(d.dist_m).toFixed(2) + ' m';
+        if (returningHome && parseFloat(d.dist_m) <= 0.05) {
+          returningHome = false;
+        }
+      }
+
+      if (d.moving !== undefined) {
+        const el = document.getElementById('status-moving');
+        el.textContent = d.moving ? 'MOVING' : 'STANDBY';
+        el.className = 'sensor-value' + (d.moving ? ' moving' : '');
+      }
+
+      if (d.tension !== undefined) {
+        const el = document.getElementById('t-voltage');
+        el.textContent = parseFloat(d.tension).toFixed(1) + ' V';
+        el.className = 'tele-value' + (d.tension < 35 ? ' alert' : d.tension < 37 ? ' warn' : '');
+        const pct = Math.round(Math.min(100, Math.max(0, (d.tension - 35.0) / (42.0 - 35.0) * 100)));
+        const elB = document.getElementById('t-battery');
+        elB.textContent = pct + ' %';
+        elB.className = 'tele-value' + (pct < 15 ? ' alert' : pct < 30 ? ' warn' : '');
+      }
+
+      if (d.temperature !== undefined) {
+        const el = document.getElementById('t-temp');
+        el.textContent = parseFloat(d.temperature).toFixed(1) + ' °C';
+        el.className = 'tele-value' + (d.temperature > 70 ? ' alert' : d.temperature > 55 ? ' warn' : '');
+      }
+
+      if (d.vitesse !== undefined) {
+        document.getElementById('t-speed').textContent =
+          parseFloat(d.vitesse).toFixed(2) + ' km/h';
+      }
+
+      if (!returningHome && d.hittarget !== undefined && d.hittarget == 1) {
+        showHitAlert();
+      }
+
+    } catch(e) {}
+  };
+}
+
+// ── MODAL HIT ALERT ──────────────────────────────────
+function showHitAlert() {
+  if (hitAlertActive) return;
+  hitAlertActive = true;
+  const inp = document.getElementById('hit-code-input');
+  const err = document.getElementById('hit-code-error');
+  inp.value = '';
+  inp.className = '';
+  err.textContent = '';
+  document.getElementById('hit-overlay').classList.add('show');
+  setTimeout(() => inp.focus(), 200);
+}
+function closeHitAlert() {
+  const inp = document.getElementById('hit-code-input');
+  const err = document.getElementById('hit-code-error');
+  if (inp.value !== '0610') {
+    inp.className = 'wrong';
+    err.textContent = 'WRONG CODE';
+    setTimeout(() => {
+      inp.value = '';
+      inp.className = '';
+      err.textContent = '';
+      inp.focus();
+    }, 900);
+    return;
+  }
+  hitAlertActive = false;
+  returningHome = true;
+  document.getElementById('hit-overlay').classList.remove('show');
+  cmdHome();
+}
+
+function setLastCmd(txt) {
+  document.getElementById('last-cmd').textContent = txt;
+}
+
+let ft = null;
+function flash(msg) {
+  const el = document.getElementById('flash');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(ft);
+  ft = setTimeout(() => el.classList.remove('show'), 900);
+}
+
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('touchstart', e => {
+  if (e.touches.length > 1) e.preventDefault();
+}, { passive: false });
+</script>
+
+<!-- IMPACT ALERT MODAL -->
+<div id="hit-overlay">
+  <div id="hit-box">
+    <div id="hit-icon">&#9888;&#65039;</div>
+    <div id="hit-title">ALERT</div>
+    <div id="hit-msg">
+      Impact detected on the robot.<br>
+      Please aim <strong>only at the target</strong><br>
+      to avoid damaging the equipment.
+    </div>
+    <div id="hit-code-wrap">
+      <div id="hit-code-label">&#128274; Enter the unlock code</div>
+      <input id="hit-code-input" type="password" maxlength="4"
+             inputmode="numeric" autocomplete="off"
+             placeholder="&#8226;&#8226;&#8226;&#8226;">
+      <div id="hit-code-error"></div>
+    </div>
+    <button id="hit-close" onclick="closeHitAlert()">&#10003;&nbsp; I will be careful</button>
+  </div>
+</div>
+
+</body>
+</html>
+
+)rawliteral";
+
+
+
+// --- HMI BROADCAST ---
+void broadcastState() {
+  if (vesc.getVescValues()) { //lecture des variables de l'esc
+    Serial.printf("\n[STATUS] Batt: %.1fV | Current: %.1fA | Dist: %.2fm | Target: %.2fm | Temperature Mosfet: %.2f° | Speed: %.2fkm/h\n", 
+                  vesc.data.inpVoltage, vesc.data.avgMotorCurrent, (filtered_dist_mm/1000.0), (target_dist_mm/1000.0), vesc.data.tempMosfet, ((vesc.data.rpm/10 * distance_par_tour * 60.0) / 1000.0)); //affichage dans le port série
+  
+    StaticJsonDocument<200> doc;
+    doc["rot"] = rot_pos;
+    doc["dist_m"] = filtered_dist_mm / 1000.0; 
+    doc["moving"] = moving_translation;
+    doc["tension"] = vesc.data.inpVoltage;
+    doc["vitesse"] = (vesc.data.rpm/10 * distance_par_tour * 60.0) / 1000.0;
+    doc["temperature"] = vesc.data.tempMosfet;
+    doc["hittarget"] = hitCible;
+    String output;
+    serializeJson(doc, output);
+    webSocket.broadcastTXT(output);
+  }
+}
+
+// --- MOTOR COMMAND ---
+void stopRobot() {
+  moving_translation = false;
+  erreur_precedente = 0;
+  integral = 0;
+  current_duty = 0;
+  vesc.setBrakeCurrent(5.0);  //value in amps of the braking current
+  
+}
+
+// --- MANUAL LED P9813 CONTROL ---
+void setSpotColor(String color) {
+  leds[0] = CRGB::Red;
+  FastLED.show();
+  if (color == "white") leds[0] = CRGB::White;
+  else if (color == "red")  leds[0] = CRGB::Red;
+  else if (color == "blue") leds[0] = CRGB::Blue;
+  else if (color == "off")  leds[0] = CRGB::Black;
+  FastLED.show();
+  Serial.println("LED changed via HMI: " + color);
+}
+
+// --- LIDAR READING ---
+void updateLidar() {
+  static uint8_t buffer[16];
+  static int index = 0;
+  while (LidarSerial.available()) {
+    uint8_t b = LidarSerial.read();
+    if (index == 0 && b != 0x57) continue; 
+    buffer[index++] = b;
+    if (index == 16) {
+      float raw_dist = (uint32_t)(buffer[9] << 8) | buffer[8];
+      index = 0;
+      if (raw_dist > 100 && raw_dist <= initial_dist) { 
+        current_dist_mm = initial_dist - raw_dist;
+        if (current_dist_mm < 0) current_dist_mm = 0;
+        filtered_dist_mm = (filtered_dist_mm * 0.6) + (current_dist_mm * 0.4); //fonction de filtre de la distance lu 
+        lastLidarTime = millis(); 
+      }     
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  FastLED.addLeds<P9813, DATA_PIN, CLOCK_PIN, RGB>(leds, NUM_LEDS);
+  leds[0] = CRGB::Red;
+  FastLED.show();
+  delay(100);
+  leds[0] = CRGB::Black; 
+  FastLED.show();
+
+  
+
+  LidarSerial.begin(921600, SERIAL_8N1, 14, 27);
+  VescSerial.begin(115200, SERIAL_8N1, 16, 17);
+  vesc.setSerialPort(&VescSerial);
+  
+  servoRot.attach(PIN_ROT, 600, 2300);
+  servoRot.write(rot_pos);
+
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASS); 
+  Serial.println(WiFi.softAPIP());
+  httpUpdater.setup(&server);
+
+  
+
+  // --- API ROUTES ---
+  server.on("/", HTTP_GET, [](){ server.send(200, "text/html", index_html); });
+
+  server.on("/api/move", HTTP_POST, [](){
+    if(server.hasArg("dist")) {
+      target_dist_mm = constrain(server.arg("dist").toFloat() * 1000.0, 0, DISTANCEMAX);
+      moving_translation = true;
+      erreur_precedente = 0;
+      integral = 0;
+      current_duty = 0;
+      if (hitCible == 1){
+        hitCible = 0;
+        leds[0] = CRGB::Black;  
+        FastLED.show();
+        
+      }
+    }
+    server.send(200, "ok");
+  });
+  server.on("/api/stop", HTTP_POST, [](){ stopRobot(); server.send(200,"ok"); }); 
+  server.on("/api/light", HTTP_POST, [](){ 
+    if(server.hasArg("c")) setSpotColor(server.arg("c")); 
+    server.send(200,"ok"); 
+  });
+  server.on("/api/left",   HTTP_POST, [](){ rot_pos=5;   servoRot.write(rot_pos); server.send(200,"ok"); }); // target-facing position   // rot_pos is the angle in degrees
+  server.on("/api/center",  HTTP_POST, [](){ rot_pos=97; servoRot.write(rot_pos); server.send(200,"ok"); }); // target middle position
+  server.on("/api/right",  HTTP_POST, [](){ rot_pos=180; servoRot.write(rot_pos); server.send(200,"ok"); }); // target back position
+
+
+  server.begin();
+  webSocket.begin();
+
+  updateLidar();
+}
+
+void loop() {
+  server.handleClient();
+  webSocket.loop();
+  updateLidar();
+  ////////////////////// lidar signal loss safety //////////////
+  if (moving_translation && (millis() - lastLidarTime > 500)) {
+    Serial.println("!!! ALERT: LIDAR SIGNAL LOST - EMERGENCY STOP !!!");
+    leds[0] = CRGB::Red; 
+    FastLED.show();
+    stopRobot(); 
+  }
+  ////////////envoie data//////////
+  static unsigned long lastMonitor = 0;
+  if (millis() - lastMonitor > 500) {
+    broadcastState();
+    lastMonitor = millis();
+  }
+
+
+  if (moving_translation) { // robot movement function
+    float erreur = filtered_dist_mm - target_dist_mm;
+    if (abs(erreur) < 120 && abs(current_duty) < 0.05) {
+      stopRobot();
+    } 
+    else {
+      
+      if (millis() - lastPID > 20) {////////////calcul pid///////////////
+        float P = Kp * erreur;
+        integral = constrain(integral + erreur*0.02, -1000, 1000);
+        float I = Ki * integral;
+        float D = Kd * (erreur - erreur_precedente);
+        erreur_precedente = erreur;
+        float dynamic_max_duty = (filtered_dist_mm < 300) ? 0.15 : MAX_DUTY;
+        float target_duty = constrain(P + I + D, -dynamic_max_duty, dynamic_max_duty);
+        if (current_duty < target_duty) {
+          current_duty += ACCEL_STEP;
+          if (current_duty > target_duty) current_duty = target_duty;
+        } 
+        else if (current_duty > target_duty) {
+          current_duty -= ACCEL_STEP;
+          if (current_duty < target_duty) current_duty = target_duty;
+        }
+        vesc.setDuty(-current_duty);
+        lastPID = millis();
+      }
+      ///////////////////// overheat or overcurrent safety ///////////////
+      if (abs(vesc.data.avgMotorCurrent) > 20.0 || vesc.data.tempMosfet > 75.0) { 
+        Serial.println("!!! ALERT: OVERHEAT OR OVERCURRENT - STOP !!!");
+        stopRobot();
+      }
+    }
+  }
+  ////////////si pas de mouvement alors detection de tir sur le robot/////////
+  else { 
+    static unsigned long lastBrakeCurrent = 0;
+     if (millis() - lastBrakeCurrent > 20) { //la detection se fait toute les 20ms 
+      //vesc.setBrakeCurrent(3.0);            // possible to add active braking here. (adding a brake reduces hit-detection sensitivity)
+      vesc.getVescValues();
+
+      if (abs(vesc.data.rpm) > 0.20 && (millis() - lastPID) > 5000 && target_dist_mm > 0 ){  // detection threshold 0.20 RPM value (increasing this value reduces sensitivity); detection starts 5s after the end of a move, and only if the robot isn't at the home position
+        leds[0] = CRGB::Red; 
+        FastLED.show();
+        hitCible = 1;
+        moving_translation = true;
+        erreur_precedente = 0;
+        integral = 0;
+        current_duty = 0;
+      }
+      lastBrakeCurrent = millis();
+      
+    }
+   
+    
+  }
+  //////////////////////// safety: distance not changing despite motor command ///////////
+  static float last_check_dist = 0;
+  static unsigned long last_dist_change_time = 0;
+  if (moving_translation && abs(current_duty) > 0.1) {
+    if (abs(filtered_dist_mm - last_check_dist) > 10) { 
+        last_check_dist = filtered_dist_mm;
+        last_dist_change_time = millis();
+    }
+    if (millis() - last_dist_change_time > 2000) { // if the robot hasn't detected any lidar movement for 2s, it stops
+        Serial.println("!!! ALERT: ROBOT STUCK OR LIDAR FROZEN !!!");
+        stopRobot();
+    }
+  }
+  else {
+    last_dist_change_time = millis();
+    last_check_dist = filtered_dist_mm;
+  }
+}
+

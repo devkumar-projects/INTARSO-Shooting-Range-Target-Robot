@@ -186,6 +186,9 @@ firmware/
 ├── main_controller/            Full ESP32 firmware: WiFi AP, HTTP+WebSocket server,
 │                                state-feedback/PID position loop, hit detection,
 │                                safety interlocks, embedded HTML/JS tablet UI
+│   └── tablet_ui.html           Standalone copy of the dashboard UI (the served
+│                                version is embedded as a PROGMEM string in the
+│                                .ino; this file mirrors it for readability/editing)
 └── tests_and_calibration/       Standalone unit tests used during bring-up
     ├── lidar_test/               Raw LiDAR frame parsing test
     ├── servo_sweep_test/         Basic servo sweep

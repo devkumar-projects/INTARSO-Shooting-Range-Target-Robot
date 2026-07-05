@@ -57,36 +57,45 @@ The firmware implements the position loop as a discrete PID on the LiDAR distanc
 
 **Plant model.** Treating the hub-motor-driven cart as a first-order velocity system (duty cycle → acceleration, with viscous/back-EMF damping):
 
-$$
-\dot{x}_1 = x_2, \qquad \dot{x}_2 = -a\,x_2 + b\,u
-$$
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/equations/eq1_plant_dark.png">
+    <img src="docs/equations/eq1_plant_light.png" alt="equation">
+  </picture>
+</p>
 
-where $x_1$ is position (measured by the LiDAR), $x_2$ is velocity, $u \in [-1, 1]$ is the commanded duty cycle, $a$ is the effective damping coefficient, and $b$ is the motor gain.
+where `x₁` is position (measured by the LiDAR), `x₂` is velocity, `u ∈ [−1, 1]` is the commanded duty cycle, `a` is the effective damping coefficient, and `b` is the motor gain.
 
 **Integral augmentation.** To reject steady-state error (static friction, cable drag, slope of the rail), the tracking error is integrated as an extra state:
 
-$$
-x_3 = \int (x_{1,\text{ref}} - x_1)\, dt, \qquad \dot{x}_3 = x_{1,\text{ref}} - x_1
-$$
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/equations/eq2_integral_dark.png">
+    <img src="docs/equations/eq2_integral_light.png" alt="equation">
+  </picture>
+</p>
 
-**Augmented state-space system**, $X = [x_1, x_2, x_3]^T$:
+**Augmented state-space system**, `X = [x₁, x₂, x₃]ᵀ`:
 
-$$
-\dot{X} = A X + B u + E\, x_{1,\text{ref}}, \quad
-A = \begin{bmatrix} 0 & 1 & 0 \\ 0 & -a & 0 \\ -1 & 0 & 0 \end{bmatrix}, \;
-B = \begin{bmatrix} 0 \\ b \\ 0 \end{bmatrix}, \;
-E = \begin{bmatrix} 0 \\ 0 \\ 1 \end{bmatrix}
-$$
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/equations/eq3_statespace_dark.png">
+    <img src="docs/equations/eq3_statespace_light.png" alt="equation">
+  </picture>
+</p>
 
 **Full-state feedback control law**:
 
-$$
-u = -K X + K_p\, x_{1,\text{ref}} = K_p\,(x_{1,\text{ref}} - x_1) - K_d\, x_2 + K_i\, x_3
-$$
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/equations/eq4_control_law_dark.png">
+    <img src="docs/equations/eq4_control_law_light.png" alt="equation">
+  </picture>
+</p>
 
-which is exactly a PID acting on the position error, with the derivative term taken on measured velocity (avoiding derivative kick on setpoint changes) rather than on the error itself. Substituting the control law back into the state equation gives the closed-loop system matrix $A_{cl} = A - BK$; the theoretical design method is to place the three closed-loop poles of $\det(sI - A_{cl}) = 0$ (e.g. via pole placement or an LQR cost) to hit a target settling time and damping ratio, which is what would determine $K_p$, $K_i$, $K_d$ from $a$ and $b$ in a fully model-based design.
+which is exactly a PID acting on the position error, with the derivative term taken on measured velocity (avoiding derivative kick on setpoint changes) rather than on the error itself. Substituting the control law back into the state equation gives the closed-loop system matrix `A_cl = A − BK`; the theoretical design method is to place the three closed-loop poles of `det(sI − A_cl) = 0` (e.g. via pole placement or an LQR cost) to hit a target settling time and damping ratio, which is what would determine `K_p`, `K_i`, `K_d` from `a` and `b` in a fully model-based design.
 
-**What the firmware actually does** is the discrete-time version of this law, tuned empirically directly on the robot (since identifying $a$ and $b$ precisely for a friction-varying rail is impractical):
+**What the firmware actually does** is the discrete-time version of this law, tuned empirically directly on the robot (since identifying `a` and `b` precisely for a friction-varying rail is impractical):
 
 ```cpp
 float P = Kp * erreur;
@@ -100,15 +109,21 @@ with a 20 ms control period (50 Hz), an **anti-windup clamp** on the integral te
 
 **Wheel kinematics** — converting motor electrical RPM to linear speed and distance:
 
-$$
-d_{\text{rev}} = \pi \, D_{\text{wheel}} = \pi \times 0.139\ \text{m} \approx 0.4366\ \text{m/rev}
-$$
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/equations/eq5_wheel_rev_dark.png">
+    <img src="docs/equations/eq5_wheel_rev_light.png" alt="equation">
+  </picture>
+</p>
 
-$$
-v\ [\text{km/h}] = \frac{\text{ERPM}}{p} \times d_{\text{rev}} \times \frac{60}{1000}
-$$
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/equations/eq6_speed_dark.png">
+    <img src="docs/equations/eq6_speed_light.png" alt="equation">
+  </picture>
+</p>
 
-where $p = 10$ is the number of pole pairs (20 poles), so mechanical RPM $= \text{ERPM}/p$.
+where `p = 10` is the number of pole pairs (20 poles), so mechanical RPM `= ERPM/p`.
 
 ## Firmware behavior (main control loop)
 

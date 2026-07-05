@@ -223,4 +223,4 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-*Authors — Dev Kumar, in collaboration with JEECE · AMJE Arts et Métiers Junior Études*
+*Authors — Dev Kumar & [Tedjeddine Sebiane](https://www.linkedin.com/in/tedjeddinesebiane), in collaboration with JEECE · AMJE Arts et Métiers Junior Études*

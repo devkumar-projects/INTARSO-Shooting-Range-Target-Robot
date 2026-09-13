@@ -798,13 +798,39 @@ window.onload = () => {
 };
 
 // ── HTTP ──────────────────────────────────────────────
+let apiToken = '';
+
+function getApiToken() {
+  if (apiToken) return apiToken;
+  apiToken = (localStorage.getItem('intarso_api_token') || '').trim();
+  if (!apiToken) {
+    apiToken = (window.prompt('Enter the robot API token') || '').trim();
+    if (apiToken) localStorage.setItem('intarso_api_token', apiToken);
+  }
+  return apiToken;
+}
+
+function clearApiToken() {
+  apiToken = '';
+  localStorage.removeItem('intarso_api_token');
+}
+
 async function post(path) {
   try {
+    const token = getApiToken();
     const r = await fetch(BASE + path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-API-Key': token
+      }
     });
-    setLastCmd(path + ' → ' + r.status);
+    if (r.status === 401 || r.status === 503) {
+      clearApiToken();
+      setLastCmd('AUTH FAILED — configure/re-enter the API token');
+    } else {
+      setLastCmd(path + ' → ' + r.status);
+    }
     return r.ok;
   } catch(e) {
     setLastCmd('ERR: ' + e.message);
@@ -961,24 +987,19 @@ function showHitAlert() {
   document.getElementById('hit-overlay').classList.add('show');
   setTimeout(() => inp.focus(), 200);
 }
-function closeHitAlert() {
-  const inp = document.getElementById('hit-code-input');
-  const err = document.getElementById('hit-code-error');
-  if (inp.value !== '0610') {
-    inp.className = 'wrong';
-    err.textContent = 'WRONG CODE';
-    setTimeout(() => {
-      inp.value = '';
-      inp.className = '';
-      err.textContent = '';
-      inp.focus();
-    }, 900);
+async function closeHitAlert() {
+  if (!getApiToken()) {
+    flash('API token required');
     return;
   }
+  const ok = await post('/api/move?dist=0');
+  if (!ok) return;
   hitAlertActive = false;
   returningHome = true;
+  targetDist = 0;
+  updateTargetDisplay();
   document.getElementById('hit-overlay').classList.remove('show');
-  cmdHome();
+  flash('HOME → 0 m');
 }
 
 function setLastCmd(txt) {
@@ -1011,10 +1032,7 @@ document.addEventListener('touchstart', e => {
       to avoid damaging the equipment.
     </div>
     <div id="hit-code-wrap">
-      <div id="hit-code-label">&#128274; Enter the unlock code</div>
-      <input id="hit-code-input" type="password" maxlength="4"
-             inputmode="numeric" autocomplete="off"
-             placeholder="&#8226;&#8226;&#8226;&#8226;">
+      <div id="hit-code-label">&#128274; Authenticated operator confirmation required</div>
       <div id="hit-code-error"></div>
     </div>
     <button id="hit-close" onclick="closeHitAlert()">&#10003;&nbsp; I will be careful</button>

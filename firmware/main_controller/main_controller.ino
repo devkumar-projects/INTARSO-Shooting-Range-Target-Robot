@@ -1061,13 +1061,9 @@ function connectWS() {
 function showHitAlert() {
   if (hitAlertActive) return;
   hitAlertActive = true;
-  const inp = document.getElementById('hit-code-input');
   const err = document.getElementById('hit-code-error');
-  inp.value = '';
-  inp.className = '';
-  err.textContent = '';
+  if (err) err.textContent = '';
   document.getElementById('hit-overlay').classList.add('show');
-  setTimeout(() => inp.focus(), 200);
 }
 async function closeHitAlert() {
   if (!getApiToken()) {

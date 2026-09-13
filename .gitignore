@@ -1,3 +1,4 @@
 .DS_Store
 *.bak
 ~*.lck
+firmware/main_controller/secrets.h

@@ -6,7 +6,8 @@
 #include <HardwareSerial.h>
 #include <ArduinoJson.h>
 #include <FastLED.h>
-#include <HTTPUpdateServer.h>
+#include <string.h>
+#include "secrets.h"
 
 // --- PIN CONFIGURATION ---
 #define NUM_LEDS 1
@@ -22,12 +23,43 @@ VescUart vesc;
 Servo servoRot;
 CRGB leds[NUM_LEDS];
 
-// --- WIFI ---
-const char* AP_SSID = "Rameneur1";     //nom du point d'acces au robot
-const char* AP_PASS = "12345678";      //mot de passe
+// --- WIFI / AUTHENTICATION ---
+// Keep the real values in secrets.h (ignored by Git), copied from
+// secrets.example.h. Motion and actuator routes require X-API-Key.
+const char* AP_SSID = INTARSO_AP_SSID;
+const char* AP_PASS = INTARSO_AP_PASS;
+const char* API_TOKEN = INTARSO_API_TOKEN;
 WebServer server(80);
-HTTPUpdateServer httpUpdater;
 WebSocketsServer webSocket = WebSocketsServer(81);
+const char* AUTH_HEADER_KEYS[] = {"X-API-Key", "Authorization"};
+
+bool credentialsConfigured() {
+  return AP_PASS != nullptr && strlen(AP_PASS) >= 8 &&
+         strcmp(AP_PASS, "REPLACE_WITH_A_STRONG_AP_PASSWORD") != 0 &&
+         API_TOKEN != nullptr && strlen(API_TOKEN) >= 32 &&
+         strcmp(API_TOKEN, "REPLACE_WITH_A_RANDOM_API_TOKEN") != 0;
+}
+
+bool requireApiKey() {
+  if (!credentialsConfigured()) {
+    server.send(503, "text/plain", "Robot credentials are not configured");
+    return false;
+  }
+
+  String provided = server.header("X-API-Key");
+  if (!provided.length()) {
+    String authorization = server.header("Authorization");
+    if (authorization.startsWith("Bearer ")) {
+      provided = authorization.substring(7);
+    }
+  }
+
+  if (provided != String(API_TOKEN)) {
+    server.send(401, "text/plain", "Authentication required");
+    return false;
+  }
+  return true;
+}
 
 // --- STATE & TARGET ---
 unsigned long lastLidarTime = 0;
@@ -848,13 +880,39 @@ window.onload = () => {
 };
 
 // ── HTTP ──────────────────────────────────────────────
+let apiToken = '';
+
+function getApiToken() {
+  if (apiToken) return apiToken;
+  apiToken = (localStorage.getItem('intarso_api_token') || '').trim();
+  if (!apiToken) {
+    apiToken = (window.prompt('Enter the robot API token') || '').trim();
+    if (apiToken) localStorage.setItem('intarso_api_token', apiToken);
+  }
+  return apiToken;
+}
+
+function clearApiToken() {
+  apiToken = '';
+  localStorage.removeItem('intarso_api_token');
+}
+
 async function post(path) {
   try {
+    const token = getApiToken();
     const r = await fetch(BASE + path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-API-Key': token
+      }
     });
-    setLastCmd(path + ' → ' + r.status);
+    if (r.status === 401 || r.status === 503) {
+      clearApiToken();
+      setLastCmd('AUTH FAILED — configure/re-enter the API token');
+    } else {
+      setLastCmd(path + ' → ' + r.status);
+    }
     return r.ok;
   } catch(e) {
     setLastCmd('ERR: ' + e.message);
@@ -1011,24 +1069,19 @@ function showHitAlert() {
   document.getElementById('hit-overlay').classList.add('show');
   setTimeout(() => inp.focus(), 200);
 }
-function closeHitAlert() {
-  const inp = document.getElementById('hit-code-input');
-  const err = document.getElementById('hit-code-error');
-  if (inp.value !== '0610') {
-    inp.className = 'wrong';
-    err.textContent = 'WRONG CODE';
-    setTimeout(() => {
-      inp.value = '';
-      inp.className = '';
-      err.textContent = '';
-      inp.focus();
-    }, 900);
+async function closeHitAlert() {
+  if (!getApiToken()) {
+    flash('API token required');
     return;
   }
+  const ok = await post('/api/move?dist=0');
+  if (!ok) return;
   hitAlertActive = false;
   returningHome = true;
+  targetDist = 0;
+  updateTargetDisplay();
   document.getElementById('hit-overlay').classList.remove('show');
-  cmdHome();
+  flash('HOME → 0 m');
 }
 
 function setLastCmd(txt) {
@@ -1061,10 +1114,7 @@ document.addEventListener('touchstart', e => {
       to avoid damaging the equipment.
     </div>
     <div id="hit-code-wrap">
-      <div id="hit-code-label">&#128274; Enter the unlock code</div>
-      <input id="hit-code-input" type="password" maxlength="4"
-             inputmode="numeric" autocomplete="off"
-             placeholder="&#8226;&#8226;&#8226;&#8226;">
+      <div id="hit-code-label">&#128274; Authenticated operator confirmation required</div>
       <div id="hit-code-error"></div>
     </div>
     <button id="hit-close" onclick="closeHitAlert()">&#10003;&nbsp; I will be careful</button>
@@ -1161,9 +1211,15 @@ void setup() {
 
 
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASS); 
+  if (!credentialsConfigured()) {
+    Serial.println("ERROR: copy secrets.example.h to secrets.h and configure strong credentials");
+    leds[0] = CRGB::Red;
+    FastLED.show();
+    return;
+  }
+  WiFi.softAP(AP_SSID, AP_PASS);
   Serial.println(WiFi.softAPIP());
-  httpUpdater.setup(&server);
+  server.collectHeaders(AUTH_HEADER_KEYS, 2);
 
   
 
@@ -1171,6 +1227,7 @@ void setup() {
   server.on("/", HTTP_GET, [](){ server.send(200, "text/html", index_html); });
 
   server.on("/api/move", HTTP_POST, [](){
+    if (!requireApiKey()) return;
     if(server.hasArg("dist")) {
       target_dist_mm = constrain(server.arg("dist").toFloat() * 1000.0, 0, DISTANCEMAX);
       moving_translation = true;
@@ -1186,14 +1243,34 @@ void setup() {
     }
     server.send(200, "ok");
   });
-  server.on("/api/stop", HTTP_POST, [](){ stopRobot(); server.send(200,"ok"); }); 
+  server.on("/api/stop", HTTP_POST, [](){
+    if (!requireApiKey()) return;
+    stopRobot();
+    server.send(200,"ok");
+  }); 
   server.on("/api/light", HTTP_POST, [](){ 
+    if (!requireApiKey()) return;
     if(server.hasArg("c")) setSpotColor(server.arg("c")); 
     server.send(200,"ok"); 
   });
-  server.on("/api/left",   HTTP_POST, [](){ rot_pos=5;   servoRot.write(rot_pos); server.send(200,"ok"); }); // target-facing position   // rot_pos is the angle in degrees
-  server.on("/api/center",  HTTP_POST, [](){ rot_pos=97; servoRot.write(rot_pos); server.send(200,"ok"); }); // target middle position
-  server.on("/api/right",  HTTP_POST, [](){ rot_pos=180; servoRot.write(rot_pos); server.send(200,"ok"); }); // target back position
+  server.on("/api/left",   HTTP_POST, [](){
+    if (!requireApiKey()) return;
+    rot_pos=5;
+    servoRot.write(rot_pos);
+    server.send(200,"ok");
+  }); // target-facing position
+  server.on("/api/center", HTTP_POST, [](){
+    if (!requireApiKey()) return;
+    rot_pos=97;
+    servoRot.write(rot_pos);
+    server.send(200,"ok");
+  }); // target middle position
+  server.on("/api/right", HTTP_POST, [](){
+    if (!requireApiKey()) return;
+    rot_pos=180;
+    servoRot.write(rot_pos);
+    server.send(200,"ok");
+  }); // target back position
 
 
   server.begin();

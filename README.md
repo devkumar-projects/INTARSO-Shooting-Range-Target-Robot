@@ -27,7 +27,7 @@ This project was delivered by **AMJE Arts et Métiers Junior Études** in partne
 
 ## Project outcome
 
-The retrofit is **fully operational**: the robot accepts a target distance from the tablet (preset buttons or manual fine adjustment), drives there under closed-loop LiDAR feedback, holds position accurately enough for competitive shooting, detects impacts on the target via unexpected wheel motion while parked, and automatically returns home after an operator unlocks the safety prompt. Every safety interlock described below (LiDAR signal loss, overcurrent/overheat, mechanical stall) was implemented and is active in the deployed firmware.
+The retrofit is **fully operational**: the robot accepts a target distance from the tablet (preset buttons or manual fine adjustment), drives there under closed-loop LiDAR feedback, holds position accurately enough for competitive shooting, detects impacts on the target via unexpected wheel motion while parked, and automatically returns home after an authenticated operator confirms the safety prompt. Every safety interlock described below (LiDAR signal loss, overcurrent/overheat, mechanical stall) was implemented and is active in the deployed firmware.
 
 ## System architecture
 
@@ -131,7 +131,7 @@ where `p = 10` is the number of pole pairs (20 poles), so mechanical RPM `= ERPM
 2. **LiDAR signal-loss safety** — if no valid LiDAR frame arrives for 500 ms while moving, the robot brakes immediately and the spot LED turns red.
 3. **Telemetry broadcast** — every 500 ms, battery voltage, motor current, MOSFET temperature, and speed are read from the VESC and pushed to every connected client as JSON over WebSocket.
 4. **Movement branch** (state-feedback/PID, above) — runs at 50 Hz while a target distance is active; stops and actively brakes (5 A brake current) once the error is under 120 mm and duty is under 5%. Overcurrent (>20 A) or overheat (>75°C) triggers an immediate stop.
-5. **Hit-detection branch** — while parked, the firmware polls the VESC's RPM every 20 ms; unexpected wheel rotation (>0.20 RPM), occurring at least 5 seconds after the last move and only when the robot isn't already home, is interpreted as an impact. It lights the LED red, raises a `hittarget` flag broadcast to the tablet (triggering a full-screen alert requiring a 4-digit unlock code), and automatically drives the robot home once acknowledged.
+5. **Hit-detection branch** — while parked, the firmware polls the VESC's RPM every 20 ms; unexpected wheel rotation (>0.20 RPM), occurring at least 5 seconds after the last move and only when the robot isn't already home, is interpreted as an impact. It lights the LED red, raises a `hittarget` flag broadcast to the tablet (triggering a full-screen alert requiring an authenticated operator confirmation), and automatically drives the robot home once acknowledged.
 6. **Stall safety** — if the measured distance hasn't moved by more than 10 mm in 2 seconds despite an active duty command above 10%, the robot is considered mechanically stuck and stops.
 
 ## Wireless HMI
@@ -142,7 +142,17 @@ The ESP32 serves a self-contained single-page web app (no external hosting neede
 - target orientation control (front / middle / back) via the servo
 - spot-light color control (blue / white / off / red-on-hit)
 - live telemetry: voltage, battery %, MOSFET temperature, speed, measured position
-- a full-screen hit alert with a 4-digit unlock code, so a hit must be acknowledged by an operator before the robot resumes normal operation
+- a full-screen hit alert that requires an authenticated operator confirmation before the robot resumes normal operation
+
+## Security and provisioning
+
+The firmware does not contain a production Wi-Fi password or operator code. Before compiling:
+
+1. Copy `firmware/main_controller/secrets.example.h` to `firmware/main_controller/secrets.h`.
+2. Set a unique Wi-Fi password (at least 8 characters) and a random API token (at least 32 characters).
+3. Keep `secrets.h` local; it is ignored by Git and must never be committed.
+
+All actuator endpoints require the API token through the `X-API-Key` header. The browser dashboard asks for the token locally and stores it only in that browser's local storage. The OTA update endpoint is intentionally disabled; update the ESP32 through a controlled, authenticated flashing workflow.
 
 ## Mechanical design
 
@@ -210,7 +220,7 @@ docs/photos/                     Real photos: target after a session, tablet HMI
 - **Embedded systems**: ESP32 firmware architecture, multi-peripheral UART management (VESC + LiDAR sharing a single MCU), non-blocking main-loop design under a WiFi server and WebSocket broadcast
 - **Control theory**: state-space modeling, integral-augmented state feedback, discrete PID implementation with anti-windup and slew-rate limiting, informed by pole-placement/LQR design principles
 - **Motor control**: VESC FOC configuration for a sensorless hub motor (pole count, power limits, UART app mode), ERPM-to-linear-speed kinematics
-- **Sensor integration**: UART LiDAR frame parsing with checksum validation and low-pass filtering
+- **Sensor integration**: UART LiDAR frame framing, range validation and low-pass filtering
 - **Safety-critical design**: multiple independent interlocks (signal loss, overcurrent/overheat, mechanical stall, unexpected motion) that fail toward a safe stop
 - **Full-stack embedded UI**: a complete HTML/CSS/JS single-page app served directly from ESP32 flash, communicating over HTTP + WebSocket with no external dependency
 - **Electronics**: schematic capture in KiCad

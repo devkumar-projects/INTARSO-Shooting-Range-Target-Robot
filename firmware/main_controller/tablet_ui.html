@@ -585,23 +585,6 @@
 
   #hit-code-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; }
   #hit-code-label { font-family: 'Arial Narrow', Arial, sans-serif; font-size: .9rem; letter-spacing: 2px; color: var(--gray); text-transform: uppercase; }
-  #hit-code-input {
-    background: #111; border: 2px solid var(--gold-dk); color: var(--gold-hi);
-    font-family: 'Courier New', Courier, monospace; font-size: 2rem; font-weight: 700;
-    letter-spacing: 10px; text-align: center; width: 160px; padding: 8px 12px;
-    outline: none; transition: border-color .2s; -webkit-text-security: disc;
-  }
-  #hit-code-input:focus  { border-color: var(--gold-hi); box-shadow: 0 0 12px rgba(212,184,106,.35); }
-  #hit-code-input.wrong  { border-color: var(--red-hi); animation: shake .35s ease; }
-  #hit-code-input.correct { border-color: var(--green); box-shadow: 0 0 12px rgba(39,174,96,.5); }
-
-  @keyframes shake {
-    0%,100% { transform: translateX(0); }
-    20% { transform: translateX(-8px); }
-    40% { transform: translateX(8px); }
-    60% { transform: translateX(-6px); }
-    80% { transform: translateX(6px); }
-  }
   #hit-code-error { font-family: 'Arial Narrow', Arial, sans-serif; font-size: .85rem; color: var(--red-hi); letter-spacing: 2px; min-height: 18px; text-align: center; }
 
 </style>
